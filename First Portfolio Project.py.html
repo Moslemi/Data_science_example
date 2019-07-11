@@ -1,0 +1,429 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # Salary Predictions Based on Job Descriptions
+
+# # Part 1 - DEFINE
+
+# ### ---- 1 Define the problem ----
+
+# Write the problem in your own words here
+
+# In[1]:
+
+
+#import your libraries
+import pandas as pd
+import sklearn as sk
+#etc
+from sklearn.utils import shuffle
+import matplotlib.pyplot as plt
+import seaborn as sns
+get_ipython().run_line_magic('matplotlib', 'inline')
+#your info here
+__author__ = "Mahdi Moslemi"
+__email__ = "moslemi.mahdi@gmail.com"
+# it is an assignement of Data Science Dream job
+
+
+# ## Part 2 - DISCOVER
+
+# ### ---- 2 Load the data ----
+
+# In[2]:
+
+
+#load the data into a Pandas dataframe
+train_feature_file = 'data/train_features.csv'
+train_target_file = 'data/train_salaries.csv'
+test_feature_file = 'data/test_features.csv'
+
+feature_df = pd.read_csv(train_feature_file)
+target_df = pd.read_csv(train_target_file)
+test_df = pd.read_csv(test_feature_file)
+
+#consolidate training data   this is the usual complete data which we have
+raw_train_df = pd.merge(feature_df, target_df, how='inner', on='jobId')
+raw_train_df.head()
+
+
+# ### ---- 3 Clean the data ----
+
+# In[3]:
+
+
+#look for duplicate data, invalid data (e.g. salaries <=0), or corrupt data and remove it
+clean_df = raw_train_df.drop_duplicates(subset='jobId')
+clean_df = clean_df[clean_df.salary>0]
+
+#clean, shuffle, and reindex training data -- shuffling improves cross-validation accuracy
+clean_train_df = shuffle(clean_df).reset_index()
+
+categorical_vars = ['companyId', 'jobType', 'degree', 'major', 'industry']
+numeric_vars = ['yearsExperience', 'milesFromMetropolis']
+target_var = 'salary'
+
+
+# defining a function for one hot column process on 
+def one_hot_encode_feature_df(df, cat_vars=None, num_vars=None):
+    '''performs one-hot encoding on all categorical variables and combines result with continous variables'''
+    cat_df = pd.get_dummies(df[cat_vars])
+    num_df = df[num_vars].apply(pd.to_numeric)
+    return pd.concat([cat_df, num_df], axis=1,ignore_index=False)
+
+
+# applying one hot columns procced on "clean_train_df" and "test_df" :
+feature_df = one_hot_encode_feature_df(clean_train_df, cat_vars = categorical_vars, num_vars= numeric_vars)
+#test_df = one_hot_encode_feature_df(test_df, cat_vars=categorical_vars, num_vars=numeric_vars)
+
+# target df:
+target_df = clean_train_df['salary']
+
+
+# ### ---- 4 Explore the data (EDA) ----
+
+# In[4]:
+
+
+#summarize each feature variable
+#feature_df.describe(include = [np.number])
+#feature_df.describe(include = ['O'])
+
+plt.figure(figsize = (14, 6))
+plt.subplot(1,2,1)
+sns.boxplot(clean_train_df.salary)
+plt.subplot(1,2,2)
+sns.distplot(clean_train_df.salary, bins=20)
+plt.show()
+
+#Use IQR rule to identify potential outliers
+
+stat = clean_train_df.salary.describe()
+print(stat)
+IQR = stat['75%'] - stat['25%']
+upper = stat['75%'] + 1.5 * IQR
+lower = stat['25%'] - 1.5 * IQR
+print('The upper and lower bounds for suspected outliers are {} and {}.'.format(upper, lower))
+
+
+
+#summarize the target variable
+#look for correlation between each feature and the target
+#look for correlation between features
+#initialize model list and dicts
+models = []
+mean_mse = {}
+cv_std = {}
+res = {}
+
+#define number of processes to run in parallel
+num_procs = 2
+
+#shared model paramaters
+verbose_lvl = 0
+
+
+# In[5]:
+
+
+def plot_feature(df, col):
+    '''
+    Make plot for each features
+    left, the distribution of samples on the feature
+    right, the dependance of salary on the feature
+    '''
+    plt.figure(figsize = (14, 6))
+    plt.subplot(1, 2, 1)
+    if df[col].dtype == 'int64':
+        df[col].value_counts().sort_index().plot()
+    else:
+        #change the categorical variable to category type and order their level by the mean salary
+        #in each category
+        mean = df.groupby(col)['salary'].mean()         # calculte the mean for each group in salary
+        df[col] = df[col].astype('category')             # get the category type columns
+        levels = mean.sort_values().index.tolist()         # create a list of "levels" for mean values after sorting them
+        df[col].cat.reorder_categories(levels, inplace=True) # reorder the category columns by levels
+        df[col].value_counts().plot()
+    plt.xticks(rotation=45)
+    plt.xlabel(col)
+    plt.ylabel('Counts')
+    plt.subplot(1, 2, 2)
+
+    if df[col].dtype == 'int64' or col == 'companyId':
+        #plot the mean salary for each category and fill between the (mean - std, mean + std)
+        mean = df.groupby(col)['salary'].mean()
+        std = df.groupby(col)['salary'].std()
+        mean.plot()
+        plt.fill_between(range(len(std.index)), mean.values-std.values, mean.values + std.values,                          alpha = 0.1)
+    else:
+        sns.boxplot(x = col, y = 'salary', data=df)
+    
+    plt.xticks(rotation=45)
+    plt.ylabel('Salaries')
+    plt.show()
+
+
+# In[6]:
+
+
+plot_feature(clean_train_df, 'companyId')
+
+
+# In[7]:
+
+
+plot_feature(clean_train_df, 'jobType')
+
+
+# In[8]:
+
+
+plot_feature(clean_train_df, 'degree')
+
+
+# In[9]:
+
+
+plot_feature(clean_train_df, 'yearsExperience')
+
+
+# In[10]:
+
+
+# Correlations between selected features and response
+# jobId is discarded because it is unique for individual
+fig = plt.figure(figsize=(12, 10))
+features = ['companyId', 'jobType', 'degree', 'major', 'industry', 'yearsExperience', 'milesFromMetropolis']
+sns.heatmap(clean_df[features + ['salary']].corr(), cmap='Blues', annot=True)
+plt.xticks(rotation=45)
+plt.show()
+
+
+# # ---- 5 Establish a baseline ----
+
+# In[13]:
+
+
+#create models -- hyperparameter tuning already done by hand for each model
+
+
+#select a reasonable metric (MSE in this case)
+#create an extremely simple model and measure its efficacy
+#e.g. use "average salary" for each industry as your model and then measure MSE
+#during 5-fold cross-validation
+
+
+# # ---- 6 Hypothesize solution ----
+# 
+
+# In[14]:
+
+
+#brainstorm 3 models that you think may improve results over the baseline model based
+#on your 
+
+
+# Brainstorm 3 models that you think may improve results over the baseline model based on your EDA and explain why they're reasonable solutions here.
+# 
+# Also write down any new features that you think you should try adding to the model based on your EDA, e.g. interaction variables, summary statistics for each group, etc
+
+# In[11]:
+
+
+#create models -- hyperparameter tuning already done by hand for each model
+#select a reasonable metric (MSE in this case)
+#create an extremely simple model and measure its efficacy
+#e.g. use "average salary" for each industry as your model and then measure MSE
+#during 5-fold cross-validation
+import numpy as np
+from sklearn.model_selection import cross_val_score
+from sklearn.metrics import mean_squared_error
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+
+
+
+lr = LinearRegression()
+lr_std_pca = make_pipeline(StandardScaler(), PCA(), LinearRegression())
+rf = RandomForestRegressor(n_estimators=150, n_jobs=num_procs, max_depth=25, min_samples_split=60,                            max_features=30, verbose=verbose_lvl)
+gbm = GradientBoostingRegressor(n_estimators=150, max_depth=5, loss='ls', verbose=verbose_lvl)
+                      
+models.extend([lr, lr_std_pca, rf, gbm])
+
+
+# defining a function for train_model
+def train_model(model, feature_df, target_df, num_procs, mean_mse, cv_std):
+    neg_mse = cross_val_score(model, feature_df, target_df, cv=2, n_jobs=num_procs, scoring='neg_mean_squared_error')
+    mean_mse[model] = -1.0*np.mean(neg_mse)
+    cv_std[model] = np.std(neg_mse)
+
+def print_summary(model, mean_mse, cv_std):
+    print('\nModel:\n', model)
+    print('Average MSE:\n', mean_mse[model])
+    print('Standard deviation during CV:\n', cv_std[model])
+
+#parallel cross-validate models, using MSE as evaluation metric, and print summaries
+print("Beginning cross validation")
+for model in models:
+    train_model(model, feature_df, target_df, num_procs, mean_mse, cv_std)
+    print_summary(model, mean_mse, cv_std)
+
+
+# In[5]:
+
+
+
+
+
+# ## Part 3 - DEVELOP
+
+# You will cycle through creating features, tuning models, and training/validing models (steps 7-9) until you've reached your efficacy goal
+# 
+# #### Your metric will be MSE and your goal is:
+#  - <360 for now
+#  
+# 
+
+# ### ---- 7 Engineer features  ----
+
+# In[15]:
+
+
+#make sure that data is ready for modeling
+#create any new features needed to potentially enhance model
+# in this part we cab add coulmns such as mean, skew, std .... 
+
+
+# ### ---- 8 Create models ----
+
+# In[16]:
+
+
+#create and tune the models that you brainstormed during part 2
+# this part could be as creating  a new pipline or applying penalies such as L1 , L2 ,Ridge, .. for improving our model
+#(As an example if we need smaller MSE)
+
+
+# ### ---- 9 Test models ----
+
+# In[17]:
+
+
+#do 5-fold cross validation on models and measure MSE
+
+# we considered max depth = 5
+
+
+# ### ---- 10 Select best model  ----
+
+# In[20]:
+
+
+#select the model with the lowest error as your "prodcuction" model
+#choose model with lowest mse
+model = min(mean_mse, key=mean_mse.get)
+print('\nPredictions calculated using model with lowest MSE:')
+print(model)
+
+
+# ## Part 4 - DEPLOY
+
+# ### ---- 11 Automate pipeline ----
+
+# In[ ]:
+
+
+#write script that trains model on entire training set, saves model to disk,
+#and scores the "test" dataset
+#train model on entire dataset
+model.fit(feature_df, target_df)
+
+# test_df also should be one hot columns
+test_df = one_hot_encode_feature_df(test_df, cat_vars=categorical_vars, num_vars=numeric_vars)
+
+#create predictions based on test data
+predictions = model.predict(test_df)
+
+
+# ### ---- 12 Deploy solution ----
+
+# In[ ]:
+
+
+#save your prediction to a csv file or optionally save them as a table in a SQL database
+#additionally, you want to save a visualization and summary of your prediction and feature importances
+#these visualizations and summaries will be extremely useful to business stakeholders
+#store feature importances
+
+def save_results(model, mean_mse, predictions, feature_importances):
+    '''saves model, model summary, feature importances, and predictions'''
+    with open('model.txt', 'w') as file:
+        file.write(str(model))
+    feature_importances.to_csv('feature_importances.csv') 
+    np.savetxt('predictions.csv', predictions, delimiter=',')
+    
+    
+if hasattr(model, 'feature_importances_'):       #The hasattr() method returns true if an object has the given named attribute and false if it does not.
+    importances = model.feature_importances_
+else:
+    #linear models don't have feature_importances_
+    importances = [0]*len(feature_df.columns)
+    
+feature_importances = pd.DataFrame({'feature':feature_df.columns, 'importance':importances})
+feature_importances.sort_values(by='importance', ascending=False, inplace=True)
+#set index to 'feature'
+feature_importances.set_index('feature', inplace=True, drop=True)
+
+#save results
+save_results(model, mean_mse[model], predictions, feature_importances)
+
+
+# ### ---- 13 Measure efficacy ----
+
+# We'll skip this step since we don't have the outcomes for the test data
+
+# In[ ]:
+
+
+feature_importances[0:25].plot.bar(figsize=(20,10))
+plt.show()
+
+
+# In[ ]:
+
+
+get_ipython().system('cat model.txt')
+
+
+# In[ ]:
+
+
+get_ipython().system('head feature_importances.csv')
+
+
+# In[ ]:
+
+
+get_ipython().system('head predictions.csv')
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
